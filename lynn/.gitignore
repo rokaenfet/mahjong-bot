@@ -1,0 +1,5 @@
+venv/
+segmented/
+debug_*.png
+__pycache__/
+label_templates/
