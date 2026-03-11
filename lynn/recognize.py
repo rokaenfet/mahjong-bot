@@ -168,7 +168,7 @@ def segment_tiles(hand_img: np.ndarray) -> list[tuple[int, int, int, int]]:
     # Unblurred grayscale for brightness checks on raw pixel data
     gray_raw = cv2.cvtColor(hand_img, cv2.COLOR_BGR2GRAY)
 
-    # --- 4. Find tile-shaped contours (relaxed aspect to catch merged wide blobs) ---
+    # --- 4. Find tile-shaped contours ---
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
     tiles = []
@@ -176,7 +176,7 @@ def segment_tiles(hand_img: np.ndarray) -> list[tuple[int, int, int, int]]:
         x, y, bw, bh = cv2.boundingRect(cnt)
         area = bw * bh
         aspect = bh / bw if bw > 0 else 0
-        if area >= MIN_TILE_AREA and aspect <= TILE_ASPECT_HI:
+        if area >= MIN_TILE_AREA and TILE_ASPECT_LO <= aspect <= TILE_ASPECT_HI:
             mean_brightness = cv2.mean(gray_raw[y:y + bh, x:x + bw])[0]
             if mean_brightness >= 140:
                 tiles.append((x, y, bw, bh))
@@ -187,9 +187,9 @@ def segment_tiles(hand_img: np.ndarray) -> list[tuple[int, int, int, int]]:
     tiles = _deduplicate_tiles(tiles)
     tiles = _filter_slivers(tiles)
 
-    # --- 5. If enough tiles found, fill gaps ---
+    # --- 5. If enough tiles found, fill gaps (brightness-checked) ---
     if len(tiles) >= 8:
-        return _fill_gaps(tiles)
+        return _fill_gaps(tiles, gray_raw)
 
     # --- 6. Retry with lower threshold for darker themes ---
     _, mask2 = cv2.threshold(gray, TILE_BRIGHTNESS_THRESH - 30, 255, cv2.THRESH_BINARY)
@@ -201,7 +201,7 @@ def segment_tiles(hand_img: np.ndarray) -> list[tuple[int, int, int, int]]:
     for cnt in contours2:
         x, y, bw, bh = cv2.boundingRect(cnt)
         aspect = bh / bw if bw > 0 else 0
-        if bw * bh >= MIN_TILE_AREA and aspect <= TILE_ASPECT_HI:
+        if bw * bh >= MIN_TILE_AREA and TILE_ASPECT_LO <= aspect <= TILE_ASPECT_HI:
             mean_brightness = cv2.mean(gray_raw[y:y + bh, x:x + bw])[0]
             if mean_brightness >= 140:
                 tiles2.append((x, y, bw, bh))
@@ -212,7 +212,7 @@ def segment_tiles(hand_img: np.ndarray) -> list[tuple[int, int, int, int]]:
     tiles2 = _filter_slivers(tiles2)
 
     if len(tiles2) >= 8:
-        return _fill_gaps(tiles2)
+        return _fill_gaps(tiles2, gray_raw)
 
     # --- 7. Last resort: uniform split ---
     return _uniform_split(hand_img)
@@ -296,8 +296,17 @@ def _filter_slivers(tiles: list[tuple[int, int, int, int]]) -> list[tuple[int, i
     return tiles
 
 
-def _fill_gaps(tiles: list[tuple[int, int, int, int]]) -> list[tuple[int, int, int, int]]:
-    """Fill any wide gaps between detected tiles with evenly-spaced boxes."""
+def _fill_gaps(
+    tiles: list[tuple[int, int, int, int]],
+    gray_raw: np.ndarray | None = None,
+) -> list[tuple[int, int, int, int]]:
+    """Fill wide gaps between detected tiles with evenly-spaced boxes.
+
+    Only fills a gap if the gap region is bright (mean >= 140), indicating
+    a real tile is present but was missed by the contour detector (e.g. 1p
+    whose dark circles prevent a bright blob from forming). Dark gaps are
+    skipped so phantom tiles are not inserted at the end of the hand.
+    """
     if len(tiles) < 2:
         return tiles
 
@@ -310,7 +319,20 @@ def _fill_gaps(tiles: list[tuple[int, int, int, int]]) -> list[tuple[int, int, i
         left_of_next = filled[i + 1][0]
         gap = left_of_next - right_of_curr
 
-        if gap > median_w * 1.5:
+        if gap > median_w * 1.1:
+            # Check if the gap region contains a bright tile face.
+            # Use only the top 35% of the crop (where the label lives) to avoid
+            # false rejection from tiles like 1p that have large dark circles.
+            if gray_raw is not None:
+                gap_col_start = max(0, right_of_curr)
+                gap_col_end = min(gray_raw.shape[1], left_of_next)
+                if gap_col_end > gap_col_start:
+                    top_rows = max(1, gray_raw.shape[0] * 35 // 100)
+                    gap_region = gray_raw[:top_rows, gap_col_start:gap_col_end]
+                    if gap_region.mean() < 140:
+                        i += 1
+                        continue
+
             n_missing = max(1, round(gap / median_w))
             sub_w = gap // n_missing
             ref_y = filled[i][1]
@@ -556,7 +578,73 @@ def run(screenshot_path: str, build_templates: bool = False, debug: bool = False
             boxes, ["???" if t is None else str(t) for t in all_tiles], all_tiles, all_infos
         )
 
-        for i, (tile, info) in enumerate(zip(all_tiles, all_infos)):
+        # Neighbor-context suit correction: if a numbered tile's suit doesn't
+        # match both adjacent tiles' suit and the neighbors agree, override.
+        for i in range(len(all_tiles)):
+            tile = all_tiles[i]
+            if tile is None or not tile.suit in (Suit.MAN, Suit.PIN, Suit.SOU):
+                continue
+            neighbors = [all_tiles[j] for j in (i - 1, i + 1)
+                         if 0 <= j < len(all_tiles) and all_tiles[j] is not None
+                         and all_tiles[j].suit in (Suit.MAN, Suit.PIN, Suit.SOU)]
+            if len(neighbors) == 2 and neighbors[0].suit == neighbors[1].suit:
+                neighbor_suit = neighbors[0].suit
+                if tile.suit != neighbor_suit:
+                    corrected = Tile(neighbor_suit, tile.value)
+                    print(f"  [suit-correct] tile {i} {tile} -> {corrected} (neighbors agree)")
+                    all_tiles[i] = corrected
+                    labels[i] = str(corrected)
+
+        # Recover drawn tile by sort order if gap-detection didn't find one.
+        # The drawn tile is placed at the far right regardless of hand sort, so
+        # it often has a lower sort key than the tile before it.
+        drawn_label_recovered = None
+        if drawn_box is None and len(all_tiles) >= 2:
+            last_tile = all_tiles[-1]
+            last_info = all_infos[-1]
+            prev_tile = next((t for t in reversed(all_tiles[:-1]) if t is not None), None)
+
+            should_recover = False
+            if prev_tile is not None:
+                if last_tile is not None:
+                    if _tile_sort_key(last_tile) < _tile_sort_key(prev_tile):
+                        should_recover = True
+                elif last_info.get("label", "").isdigit() and last_info.get("suit_guess") == "honor":
+                    # Suit unknown for digit-labeled last tile: assign the suit that
+                    # creates the largest sort-key drop (most definitively a drawn tile).
+                    value = int(last_info["label"])
+                    prev_key = _tile_sort_key(prev_tile)
+                    best_suit, best_drop = Suit.MAN, -1
+                    for suit in (Suit.MAN, Suit.PIN, Suit.SOU):
+                        drop = prev_key - (_SUIT_ORDER[suit] * 10 + value)
+                        if drop > best_drop:
+                            best_drop, best_suit = drop, suit
+                    if best_drop > 0:
+                        last_tile = Tile(best_suit, value)
+                        all_tiles[-1] = last_tile
+                        labels[-1] = str(last_tile)
+                        print(f"  [drawn-suit] assigned {last_tile} (max sort-drop from {prev_tile})")
+                        should_recover = True
+
+            if should_recover:
+                drawn_label_recovered = labels[-1]
+                labels = labels[:-1]
+                all_tiles = all_tiles[:-1]
+                all_infos = all_infos[:-1]
+                print(f"  [drawn-recover] {drawn_label_recovered} -> drawn tile\n")
+
+        # Separate hand tiles from the gap-detected drawn tile for display.
+        # When drawn_box was found via gap, the last item in all_tiles/labels is drawn.
+        if drawn_box is not None and not drawn_label_recovered:
+            hand_tiles_display = list(zip(all_tiles[:-1], all_infos[:-1]))
+            drawn_display_label = labels[-1] if labels else None
+            display_labels = labels[:-1]
+        else:
+            hand_tiles_display = list(zip(all_tiles, all_infos))
+            drawn_display_label = drawn_label_recovered
+            display_labels = labels
+
+        for i, (tile, info) in enumerate(hand_tiles_display):
             if tile:
                 recognized.append(tile)
                 print(f"  Tile {i:2d}: {tile!s:>6}  "
@@ -565,7 +653,10 @@ def run(screenshot_path: str, build_templates: bool = False, debug: bool = False
             else:
                 print(f"  Tile {i:2d}: ???    ({info})")
 
-        print(f"\nHand: [{', '.join(labels)}]")
+        hand_str = f"Hand: [{', '.join(display_labels)}]"
+        if drawn_display_label:
+            hand_str += f"  +  Drawn: {drawn_display_label}"
+        print(f"\n{hand_str}")
 
         if debug:
             vis = draw_debug(hand, boxes, labels)

@@ -81,7 +81,12 @@ def _detect_suit(tile_img: np.ndarray) -> str:
     dark_mask = (v_ch < 120) & (v_ch > 20)
     dark_pct = dark_mask.sum() / total
 
-    if green > 0.04 and green > red * 1.5:
+    # Very dominant green (little red present) → sou, regardless of dark content
+    if green > 0.04 and green > red * 3.0:
+        return "sou"
+    # Moderate green with bamboo-like dark structure → sou
+    # (handles muted bamboo tiles where green/red ratio is 1.2–3x)
+    if green > 0.05 and green > red * 1.2 and dark_pct > 0.09:
         return "sou"
 
     if red > 0.04 and red > green * 2:
