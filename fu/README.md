@@ -1,6 +1,13 @@
 # ./root/fu
 
 # Functionalities
+- [ ] Simulation environment
+  - [ ] Wrappers, Aux classes for simulating Mahjong quickly and encapsulating `mahjong` library
+  - [ ] `MahjongTable()`
+    - [ ] Play game and rounds
+      - [ ] Doras
+      - [ ] Akadoras
+      - [ ] 
 - [ ] Mahjong Game Theory
    - [ ] Dataset of all hands
    - [ ] Dataset of all scoring patterns
@@ -165,3 +172,15 @@ Project Tree: fu
 │   └── sn.JPG
 └── uv.lock
 ```
+
+
+AD, EF, CG
+B opposite AE
+F can only see AG
+
+
+
+B   A D
+
+E   G
+F   C
