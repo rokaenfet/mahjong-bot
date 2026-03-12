@@ -34,7 +34,7 @@ from helper.visualizer import MahjongReplay, VizMode
 game = MahjongGame(
     player_names = ["lynn", "byron", "fu", "yagata"],
     starting_score = 25000,
-    total_ba = 2,
+    total_ba = 4,
     enable_red_dora = True,
     log_level = "full"
 )
@@ -46,3 +46,5 @@ replayer = MahjongReplay(
     mode = VizMode.TERMINAL,
     show_hand_details = True
 )
+
+replayer.show()

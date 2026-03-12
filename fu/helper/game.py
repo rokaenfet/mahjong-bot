@@ -827,29 +827,32 @@ class MahjongGame:
         tile: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None
     ) -> None:
-        """
-        Record game state snapshot for visualization/replay.
-        
-        Args:
-            phase: Current game phase (from GamePhase enum)
-            action: Specific action taken
-            tile: Tile involved in MSPZD notation
-            metadata: Additional context dictionary
-        """
+        """Record game state snapshot for visualization/replay."""
         if self.log_level == "minimal":
             return
         
-        # === FIX: Convert phase to string name ===
-        # If phase is a GamePhase enum, get its name
+        # Convert phase to string name
         if isinstance(phase, GamePhase):
-            phase_str = phase.name  # e.g., "SETUP", "DRAW", "DISCARD"
+            phase_str = phase.name
         else:
-            phase_str = str(phase)  # Already a string
-        # === END FIX ===
+            phase_str = str(phase)
         
         # Prepare player state snapshots
         player_states = []
         for player in self.players:
+            # === ADD MELD DETAILS FOR VISUALIZER ===
+            meld_data = []
+            for meld in player.melds:
+                meld_data.append({
+                    'type': ('PON' if meld.meld_type == MahjongMeld.MELD_PON else
+                            'CHI' if meld.meld_type == MahjongMeld.MELD_CHI else
+                            'KAN_OPEN' if meld.meld_type == MahjongMeld.MELD_KAN_OPEN else
+                            'KAN_CLOSED'),
+                    'tiles': [self._tile_id_to_mspzd(t) for t in meld.tiles],
+                    'from_player': meld.from_player
+                })
+            # === END MELD DETAILS ===
+            
             state = {
                 "id": player.player_id,
                 "name": player.name,
@@ -859,11 +862,16 @@ class MahjongGame:
                 "is_riichi": player.is_riichi,
                 "furiten": player.furiten,
                 "hand_size": len(player.hand) if player.hand else 0,
-                "meld_count": len(player.melds),
-                "discard_count": len(player.discards)
+                "hand_tiles": [
+                    self._tile_id_to_mspzd(t) for t in player.hand.ids
+                ] if player.hand else [],
+                "discards": [
+                    self._tile_id_to_mspzd(t) for t in player.discards
+                ],
+                "melds": meld_data,  # ✅ NEW: Meld details
+                "meld_count": len(player.melds)
             }
             
-            # Include full hand only in "full" log level
             if self.log_level == "full" and player.hand:
                 state["hand_tiles"] = [
                     self._tile_id_to_mspzd(t) for t in player.hand.ids
@@ -874,9 +882,15 @@ class MahjongGame:
             
             player_states.append(state)
         
-        # Create log entry with phase_str instead of phase
+        # === ADD TILES_REMAINING TO METADATA ===
+        extra_metadata = metadata or {}
+        extra_metadata['tiles_remaining'] = len(self.wall)
+        extra_metadata['dead_wall_remaining'] = len(self.dead_wall)
+        # === END TILES_REMAINING ===
+        
+        # Create log entry
         entry = GameLogEntry(
-            phase=phase_str,  # ✅ Store as string
+            phase=phase_str,
             ba=self.BA_NAMES[self.current_ba] if self.current_ba < len(self.BA_NAMES) else "Complete",
             kyoku=self.current_kyoku,
             honba=self.honba_count,
@@ -885,7 +899,7 @@ class MahjongGame:
             tile=tile,
             dora_indicators=self._tile_ids_to_mspzd(self.dora_indicators),
             players=player_states,
-            metadata=metadata or {}
+            metadata=extra_metadata  # ✅ Now includes tiles_remaining
         )
         
         self.game_log.append(entry)
