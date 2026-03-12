@@ -71,9 +71,30 @@ The project is structured into five core components:
                     └─────────────┘
 ```
 
-## Game Theory
-- [ ] Mahjong Game Theory
+# Game Theory
+## Current Architecture
+- [ ] Mahjong Game Theory. If Ron or Tsumo is possible, always do it (i.e. Yaku is present and wait piece comes during Tenpai)
+  - [ ] On my turn...
+    - [ ] Decide Riichi
+      - [ ] Check for all possible Riichi (best card to discard in terms of number of wait tiles)
+    - [ ] Decide An-Kan
+    - [ ] Decide discard tile
+      - [ ] Greedily find best discard for maximum Uke-ire / Shanten
+  - [ ] On opponent's turns...
+    - [ ] Decide Kan
+      - [ ] Does it improve Uke-ire / Shanten?
+    - [ ] Decide Pon
+      - [ ] Does it improve Uke-ire / Shanten?
+    - [ ] Decide Chi
+      - [ ] Does it improve Ukeire / Shanten?
 
+## Future Notes
+- Consider Furiten risks when discarding hands which are Suji of tiles which may create a meld in your hand
+- Consider potential Yaku's from current hand during expected value calculations
+- Consider _safety_ of discard hand given current table state, prevent Houjuus (discarding wait tiles of other players)
+- Consider score debuffs upon calling (Nakis)
+- Understand Ori (Safe discards) -> Genbutsu, Suji, etc...
+- Understand score differences, to change playstyle to be safer or more aggressive
 
 - Expected Value Calculations
   - _Shanten_: Number of moves to winning (reach 0 shanten)

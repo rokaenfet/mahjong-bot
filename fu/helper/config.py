@@ -3,7 +3,7 @@ import os
 # CONST
 
 TOTAL_CARD_NUM = 136 # 4 * [9pin + 9sozu + 9manzu + 3sanngennpai + 4jihai]
-TILE_IMAGE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "./tile_imgs/")
+TILE_IMAGE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "tile_imgs")
 
 # Honor tile types (34-format)
 EAST = 27
