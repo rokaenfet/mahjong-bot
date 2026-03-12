@@ -7,6 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "ipykernel>=7.2.0",
     "ipywidgets>=8.1.8",
+    "keyboard>=0.13.5",
     "mahjong>=1.4.0",
     "matplotlib>=3.10.8",
     "numpy>=2.4.3",

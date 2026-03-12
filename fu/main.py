@@ -28,6 +28,7 @@ import base64
 # Import custom mahjong classes
 import helper.config as config
 from helper.game import MahjongGame
+from helper.visualizer import MahjongReplay, VizMode
 
 
 game = MahjongGame(
@@ -39,5 +40,9 @@ game = MahjongGame(
 )
 
 results = game.play_game()
-log = game.game_log
 
+replayer = MahjongReplay(
+    game_log = game.game_log,
+    mode = VizMode.TERMINAL,
+    show_hand_details = True
+)
