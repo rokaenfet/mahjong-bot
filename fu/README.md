@@ -119,7 +119,8 @@ The project is structured into five core components:
 [Mahjong RL Environment](https://github.com/smly/RiichiEnv)
 
 # Note
-[](https://arxiv.org/pdf/2307.12087)
+[2 man CFR mahjong paper](https://arxiv.org/pdf/2307.12087)
+[naga ai] (https://dmv.nico/en/articles/mahjong_ai_naga/)
 
 # How to run code
 1. `./` root dir
