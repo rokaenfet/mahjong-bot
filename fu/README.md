@@ -118,6 +118,9 @@ The project is structured into five core components:
 [Qiita Mahjong Lib Examples](https://qiita.com/FJyusk56/items/8189bcca3849532d095f)
 [Mahjong RL Environment](https://github.com/smly/RiichiEnv)
 
+# Note
+[](https://arxiv.org/pdf/2307.12087)
+
 # How to run code
 1. `./` root dir
 2. `cd fu`
