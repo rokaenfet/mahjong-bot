@@ -2,6 +2,7 @@ from helper import config
 from helper.tile_util import Tile
 
 from typing import List, Optional, Tuple, Union, Set, Dict, Any
+import re
 
 
 class MahjongConverter:

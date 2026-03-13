@@ -50,7 +50,6 @@ class MahjongGame:
             enable_red_dora: Whether to use red 5 tiles as dora
             log_level: Logging verbosity for _log_state()
         """
-        # Player setup
         self.starting_score = starting_score
         self.total_ba = total_ba
         self.enable_red_dora = enable_red_dora

@@ -96,6 +96,18 @@ The project is structured into five core components:
 - Understand Ori (Safe discards) -> Genbutsu, Suji, etc...
 - Understand score differences, to change playstyle to be safer or more aggressive
 
+**Relevant Calculations**
+- Greedy search on Shanten when discard any of my tiles
+  - Get number of wait tiles (ukeires) given Greedy search
+- Estimate Hand Value and Win probability to get EV (Expected Valued)
+- Safe tiles and Danger tiles (Assuming knowledge of their tenpai, e.g. riichi)
+  - Furiten (Genbutsu) are safe
+  - Suji is also safe
+- Given the game is a **imperfect info and too many search states**
+  - Reinforcement Learning
+  - Tree Pruning via massive statistical dataset
+  - Counterfactual Regret Minimization
+
 - Expected Value Calculations
   - _Shanten_: Number of moves to winning (reach 0 shanten)
   - _Uke-ire_: Number of tiles which can advance my _shanten_
