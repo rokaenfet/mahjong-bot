@@ -21,9 +21,16 @@ from tiles import Tile, Suit, TILE_LOOKUP
 
 LABEL_TEMPLATES_DIR = Path(__file__).parent / "label_templates"
 CALIBRATION_FILE = LABEL_TEMPLATES_DIR / "calibration.json"
+REFERENCE_DIR = Path(__file__).parent / "reference"
 
 LABEL_X_START = 0.55
 LABEL_Y_END = 0.40
+
+# Minimum template-match score to classify a 5m/5p/5s as a red five
+RED_FIVE_THRESHOLD = 0.55
+
+# Lazy cache: suit name -> reference image (loaded on first use)
+_red_five_refs: dict[str, np.ndarray | None] = {}
 
 SUIT_MAP = {"man": Suit.MAN, "pin": Suit.PIN, "sou": Suit.SOU}
 
@@ -211,6 +218,31 @@ LABEL_TO_HONOR = {
     "Hk": (Suit.DRAGON, 1), "Ht": (Suit.DRAGON, 2), "Ch": (Suit.DRAGON, 3),
 }
 
+_SUIT_TO_RED_REF = {"man": "0m", "pin": "0p", "sou": "0s"}
+
+
+def _is_red_five(tile_img: np.ndarray, suit: str) -> bool:
+    """Return True if tile_img looks like a red five for the given suit.
+
+    Loads the corresponding 0m/0p/0s reference image from reference/ once and
+    caches it. Uses template matching on the full tile crop.
+    """
+    ref_key = _SUIT_TO_RED_REF.get(suit)
+    if ref_key is None:
+        return False
+
+    if ref_key not in _red_five_refs:
+        ref_path = REFERENCE_DIR / f"{ref_key}.png"
+        _red_five_refs[ref_key] = cv2.imread(str(ref_path)) if ref_path.exists() else None
+
+    ref = _red_five_refs[ref_key]
+    if ref is None:
+        return False
+
+    resized_ref = cv2.resize(ref, (tile_img.shape[1], tile_img.shape[0]))
+    result = cv2.matchTemplate(tile_img, resized_ref, cv2.TM_CCOEFF_NORMED)
+    return float(result.max()) >= RED_FIVE_THRESHOLD
+
 
 def recognize_tile(tile_img: np.ndarray, templates: dict[str, list[np.ndarray]]) -> tuple[Tile | None, dict]:
     """Recognize a tile using calibrated label matching + color analysis."""
@@ -232,7 +264,11 @@ def recognize_tile(tile_img: np.ndarray, templates: dict[str, list[np.ndarray]])
     if label_char.isdigit() and 1 <= int(label_char) <= 9:
         value = int(label_char)
         if suit_guess in SUIT_MAP:
-            return Tile(SUIT_MAP[suit_guess], value), debug
+            suit_obj = SUIT_MAP[suit_guess]
+            is_red = value == 5 and _is_red_five(tile_img, suit_guess)
+            if is_red:
+                debug["is_red"] = True
+            return Tile(suit_obj, value, is_red=is_red), debug
         return None, debug
 
     return None, debug

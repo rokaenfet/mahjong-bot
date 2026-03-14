@@ -36,10 +36,12 @@ HONOR_NAMES = {
 class Tile:
     suit: Suit
     value: int  # 1-9 for numbered suits; 1-4 for winds; 1-3 for dragons
+    is_red: bool = False  # True for red-five variants (0m/0p/0s)
 
     def __str__(self) -> str:
         if self.suit in SUIT_SHORT:
-            return f"{self.value}{SUIT_SHORT[self.suit]}"
+            prefix = "0" if self.is_red and self.value == 5 else str(self.value)
+            return f"{prefix}{SUIT_SHORT[self.suit]}"
         return HONOR_NAMES.get((self.suit, self.value), "??")
 
     def __repr__(self) -> str:
@@ -76,3 +78,8 @@ ALL_TILES: list[Tile] = (
 
 # Lookup: shorthand string -> Tile
 TILE_LOOKUP: dict[str, Tile] = {str(t): t for t in ALL_TILES}
+
+# Red-five shorthands
+TILE_LOOKUP["0m"] = Tile(Suit.MAN, 5, is_red=True)
+TILE_LOOKUP["0p"] = Tile(Suit.PIN, 5, is_red=True)
+TILE_LOOKUP["0s"] = Tile(Suit.SOU, 5, is_red=True)
