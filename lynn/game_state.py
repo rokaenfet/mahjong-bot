@@ -3,7 +3,7 @@ game_state.py – Full board state recognition for Mahjong Soul.
 
 Recognises (all four players: self / top / left / right):
   - Discard piles
-  - Open meld counts (pon / chii / kan)
+  - Open melds (pon / chii / kan) with tile identities
   - Riichi status
   - Dora indicator tiles and computed actual dora
   - Aka dora (red five) presence
@@ -67,14 +67,27 @@ LEFT_DISCARD  = dict(y_start=0.240, y_end=0.515, x_start=0.230, x_end=0.425)
 RIGHT_DISCARD = dict(y_start=0.240, y_end=0.515, x_start=0.572, x_end=0.762)
 
 # Open meld (pon / chii / kan) areas per opponent.
-# Top player melds appear to OUR left (their right).
-#   y_start=0.130: the dora HUD frame + x0 counters occupy y=0.000–0.125.
-#   x_end=0.160: cuts off the right-side corner wall tiles that bleed in.
-# Left player melds appear at the bottom of the left wall (their right).
-# Right player melds appear at the top of the right wall (their right).
-TOP_MELD   = dict(y_start=0.130, y_end=0.175, x_start=0.015, x_end=0.160)
-LEFT_MELD  = dict(y_start=0.750, y_end=0.990, x_start=0.010, x_end=0.150)
-RIGHT_MELD = dict(y_start=0.010, y_end=0.255, x_start=0.855, x_end=0.992)
+#
+# Left/right player melds are in a vertical column on the respective screen
+# edge (their right-hand side from their own perspective).  The same 270°/90°
+# rotation used for discards is applied so tiles face upright before
+# segmentation.  Regions are wide enough to hold up to 4 meld sets (≤ 16
+# tiles) stacked in one row after rotation.
+#
+# Top player melds appear to OUR LEFT of the top discard area.  Tiles are
+# displayed upside-down; the 180° rotation used for discards is also applied.
+#
+# Calibrated from mahjongsoul7.png (left pon of Hatsu at y≈0.700–0.887).
+# Self meld tiles appear to the RIGHT of the hand tiles at the bottom;
+# calibrated from mahjongsoul6.png (self pon of Hatsu at x≈0.800–0.930).
+SELF_MELD  = dict(y_start=0.855, y_end=0.955, x_start=0.790, x_end=0.940)
+# Top player's meld tiles are rendered in strong 3-D perspective: only a thin
+# horizontal face-strip is visible at the very top of the screen.  Calibrated
+# from mahjongsoul4.png where 6 meld tiles appear at abs x≈0.210–0.405,
+# y≈0.020–0.095.  The old region (x=0.005–0.215) missed this strip entirely.
+TOP_MELD   = dict(y_start=0.018, y_end=0.098, x_start=0.200, x_end=0.415)
+LEFT_MELD  = dict(y_start=0.420, y_end=0.955, x_start=0.045, x_end=0.150)
+RIGHT_MELD = dict(y_start=0.045, y_end=0.580, x_start=0.848, x_end=0.955)
 
 # Thin strips in front of each player where a riichi stick appears.
 # Kept narrow AND requires an elongated bright blob (see detect_riichi).
@@ -135,12 +148,37 @@ SEAT_WIND_TMPL_DIR  = _HERE / "label_templates" / "seat_wind"
 # ──────────────────────────────────────────────────────────────────────────────
 
 @dataclass
+class Meld:
+    """One open meld (pon / chii / kan).
+
+    tiles          – the 3 (or 4 for kan) recognised tile objects in
+                     left-to-right order as seen after player rotation.
+    called_tile_idx – index into ``tiles`` of the called tile (the one that
+                     was rotated 90° in the display), or None if uncertain.
+    """
+    tiles:           list[Tile | None]
+    called_tile_idx: int | None = None
+
+    def __str__(self) -> str:
+        parts = []
+        for i, t in enumerate(self.tiles):
+            s = str(t) if t else "???"
+            parts.append(f"[{s}]" if i == self.called_tile_idx else s)
+        return "(" + " ".join(parts) + ")"
+
+
+@dataclass
 class PlayerState:
-    discards:   list[Tile | None] = field(default_factory=list)
-    meld_count: int  = 0
-    riichi:     bool = False
-    score:      int | None = None
-    seat_wind:  str | None = None   # "East" / "South" / "West" / "North"
+    discards:  list[Tile | None] = field(default_factory=list)
+    melds:     list[Meld]        = field(default_factory=list)
+    riichi:    bool              = False
+    score:     int | None        = None
+    seat_wind: str | None        = None   # "East" / "South" / "West" / "North"
+
+    @property
+    def meld_count(self) -> int:
+        """Total number of meld tile slots (legacy helper; 3 per pon/chi, 4 for kan)."""
+        return sum(len(m.tiles) for m in self.melds)
 
 
 @dataclass
@@ -407,22 +445,331 @@ def is_aka_dora(tile_img: np.ndarray, tile: Tile | None) -> bool:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 5.  Opponent meld counting
+# 5.  Open meld recognition (pon / chii / kan)
 # ──────────────────────────────────────────────────────────────────────────────
 
-_MELD_BRIGHTNESS = 150
-_MELD_MIN_AREA   = 500   # filters out small HUD icons (counters, etc.)
+def _trim_to_face(tile_img: np.ndarray, min_gap: int = 3) -> np.ndarray:
+    """Strip the 3-D side-edge from a perspective-rendered meld tile.
+
+    Meld tiles in Mahjong Soul are displayed at a slight angle so the side of
+    the tile is visible on the right of each bounding box.  The label character
+    lives on the face (left portion); the side strip confuses ``_crop_label``.
+
+    Uses an adaptive brightness threshold derived from the face's own pixel
+    statistics: columns that dip below 55 % of the mean face brightness are
+    considered the edge/gap region, and the face is trimmed there.
+    """
+    gray = cv2.cvtColor(tile_img, cv2.COLOR_BGR2GRAY)
+    H, W = gray.shape
+    col_frac = (gray > 160).sum(axis=0) / H   # fraction of bright pixels per col
+
+    # Derive threshold from the left half of the tile (definitely face)
+    face_mean = float(col_frac[:W // 2].mean()) if W >= 4 else 0.8
+    threshold = face_mean * 0.55   # anything below this is in the gap / side
+
+    x = W - 1
+    while x > W // 3:
+        if col_frac[x] < threshold:
+            gap_right = x
+            while x > 0 and col_frac[x] < threshold:
+                x -= 1
+            gap_left = x + 1
+            if gap_right - gap_left + 1 >= min_gap:
+                face_w = max(gap_left, W // 3)
+                return tile_img[:, :face_w]
+        else:
+            x -= 1
+
+    return tile_img   # no clear gap → assume already face-only
 
 
-def count_opponent_melds(
+# Minimum tile area for a meld blob (larger than discard false-positives)
+# Minimum tile area for a meld blob.
+# Heavily-decorated tiles (Hatsu, bamboo) fill much of the white face area
+# with coloured glyphs, leaving only ~2900–3100 S<60 (near-white) pixels in
+# the face mask.  The threshold must stay below that to avoid dropping them.
+# False-positive risk is low: UI chrome elements in meld regions are much
+# smaller (< 1000 px²) or clearly non-white.
+_MELD_MIN_AREA = 2500
+
+
+def segment_meld_tiles(meld_img: np.ndarray) -> list[tuple]:
+    """Find tile bounding boxes in a meld strip (after player rotation).
+
+    Returns boxes sorted left-to-right.  Uses a stricter area filter than
+    ``segment_discard_tiles`` because meld tiles are larger and false-positive
+    UI elements (Tools button, avatar ornaments) are smaller.
+
+    Uses a white-face mask (low saturation, high value) instead of a raw
+    brightness threshold so that the orange/golden 3-D side edges that are
+    visible on meld tiles do not get found as separate blobs.  The side edges
+    have OpenCV-HSV saturation ≈ 200+ while tile faces are near-white (S < 60).
+    """
+    h, w = meld_img.shape[:2]
+    blurred = cv2.GaussianBlur(meld_img, (3, 3), 0)
+    hsv     = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
+    # White-face mask: low saturation (face) OR already-bleached white
+    # Excludes the orange 3-D side edges (S ≈ 200) and coloured backgrounds.
+    face_mask = ((hsv[:, :, 1] < 60) & (hsv[:, :, 2] > 150)).astype(np.uint8) * 255
+    # Also keep high-brightness pixels that aren't strongly saturated orange,
+    # so that tile art (green bamboo, red circles) within the face is still
+    # enclosed in the bounding box after dilation.
+    gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
+    bright_mask = ((gray > TILE_BRIGHTNESS_THRESH) &
+                   ~((hsv[:, :, 0] >= 15) & (hsv[:, :, 0] <= 42) &
+                     (hsv[:, :, 1] > 100) & (hsv[:, :, 2] > 140))
+                   ).astype(np.uint8) * 255
+    mask = cv2.bitwise_or(face_mask, bright_mask)
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1))
+    mask   = cv2.erode(mask, kernel, iterations=1)
+    mask   = cv2.dilate(mask, kernel, iterations=1)
+
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    boxes = []
+    for cnt in contours:
+        x, y, bw, bh = cv2.boundingRect(cnt)
+        if bw * bh >= _MELD_MIN_AREA:
+            boxes.append((x, y, bw, bh))
+
+    if not boxes:
+        return []
+
+    # Keep only blobs whose area is at least 35 % of the largest blob
+    max_area = max(b[2] * b[3] for b in boxes)
+    boxes = [b for b in boxes if b[2] * b[3] >= max_area * 0.35]
+
+    # Median-height filter to remove residual small UI elements
+    if len(boxes) >= 2:
+        med_h = sorted(b[3] for b in boxes)[len(boxes) // 2]
+        boxes = [b for b in boxes if b[3] >= med_h * 0.45]
+
+    boxes.sort(key=lambda b: b[0])
+    return boxes
+
+
+def _bleach_tile_frame(tile_img: np.ndarray) -> np.ndarray:
+    """Replace the golden/orange tile-frame pixels with white.
+
+    Meld tiles have a visible decorative frame around the face (golden/orange
+    border).  When the frame bleeds into the label zone it creates a large
+    bright blob in the BINARY_INV image that wins the largest-component contest
+    over the actual label glyph.  Bleaching those pixels to white makes them
+    disappear after BINARY_INV (white → 0), leaving only the label character.
+
+    HSV range chosen for the Mahjong Soul tile frame: H≈15–42°, S>70, V>140.
+    """
+    hsv = cv2.cvtColor(tile_img, cv2.COLOR_BGR2HSV)
+    frame = ((hsv[:, :, 0] >= 15) & (hsv[:, :, 0] <= 42) &
+             (hsv[:, :, 1] > 70)  & (hsv[:, :, 2] > 140))
+    out = tile_img.copy()
+    out[frame] = (255, 255, 255)
+    return out
+
+
+def _trim_gray_top(tile_img: np.ndarray) -> np.ndarray:
+    """Trim the gray shadow band from the top of a face-strip tile.
+
+    The top player's meld tiles are rendered in steep 3-D perspective: the face
+    blob extracted by segment_meld_tiles includes a gray shadow at the top
+    (the angled top edge of the tile) before the actual white face area starts.
+    OTSU thresholding treats this gray band as a large dark blob that outcompetes
+    the small label character.
+
+    This function finds the first row where ≥ 25 % of pixels are truly bright
+    (> 210), indicating the start of the white face area, and crops from there.
+    Falls back to the whole image if no such row is found.
+    """
+    gray = cv2.cvtColor(tile_img, cv2.COLOR_BGR2GRAY)
+    H, W = gray.shape
+    row_frac = (gray > 210).sum(axis=1) / max(1, W)
+    for y in range(H):
+        if row_frac[y] >= 0.25:
+            return tile_img[y:, :] if y > 0 else tile_img
+    return tile_img
+
+
+def _recognize_meld_tile(
+    tile_img: np.ndarray,
+    label_templates: dict,
+) -> tuple[Tile | None, dict]:
+    """Recognize a single tile extracted from a meld strip.
+
+    Steps:
+    1. Trim the 3-D side edge (right) so ``_crop_label`` sees the face only.
+    2. For landscape tiles (face-strip geometry), also trim the gray shadow band
+       from the top rows so the white face area is at the image top.
+    3. Bleach the golden tile-frame pixels so they don't dominate the binary.
+    4. Try the standard top-right label zone.
+    5. If confidence is low, also try the top-left zone (called tile fallback).
+    6. Return whichever orientation gave the higher confidence.
+    """
+    from label_ocr import recognize_tile
+
+    face = _trim_to_face(tile_img)
+
+    # The 3-D perspective rendering adds a dark shadow band at the TOP of the
+    # face crop: visible on landscape tiles (face-strip, top player) but also
+    # on some portrait tiles (left/right players viewed at an angle).
+    # Trim it unconditionally so _crop_label only sees the clean white face.
+    face = _trim_gray_top(face)
+
+    face  = _bleach_tile_frame(face)
+    tile, dbg = recognize_tile(face, label_templates)
+    conf = dbg.get("confidence", 0.0)
+
+    # Always try the horizontally-flipped face as well.  Called tiles (rotated
+    # 90° within the meld) can end up with their label at the top-LEFT after
+    # the player-crop rotation, and perspective shadows sometimes produce a
+    # spuriously high confidence for the wrong tile on the unflipped face.
+    # We always keep whichever orientation gives the higher confidence score.
+    face_flipped = cv2.flip(face, 1)
+    tile2, dbg2 = recognize_tile(face_flipped, label_templates)
+    if dbg2.get("confidence", 0.0) > conf:
+        tile, dbg = tile2, dbg2
+
+    return tile, dbg
+
+
+def _group_into_melds(
+    boxes: list[tuple],
+    crop: np.ndarray,
+    label_templates: dict,
+) -> list[Meld]:
+    """Group sorted tile boxes into meld sets of 3–4 and recognise each tile."""
+    if not boxes:
+        return []
+
+    # Estimate a typical tile width from the median of all box widths
+    med_w = sorted(b[2] for b in boxes)[len(boxes) // 2]
+
+    # Split into groups wherever there is a gap > 60 % of a tile width
+    groups: list[list[tuple]] = []
+    current = [boxes[0]]
+    for i in range(1, len(boxes)):
+        prev = boxes[i - 1]
+        gap = boxes[i][0] - (prev[0] + prev[2])
+        if gap > med_w * 0.6:
+            groups.append(current)
+            current = [boxes[i]]
+        else:
+            current.append(boxes[i])
+    groups.append(current)
+
+    # ---- post-process: split groups that are too large to be a single meld ----
+    # When two adjacent melds have no visible gap (especially the top player's
+    # face-strip tiles), all tiles land in one over-sized group.  We break such
+    # groups into sub-groups of 3 (pon/chii) – or 4 (kan) if that's what the
+    # tile count implies – using the called-tile count as a cross-check.
+    def _split_oversized(grp: list[tuple]) -> list[list[tuple]]:
+        n = len(grp)
+        if n <= 4:
+            return [grp]
+
+        # Count called tiles (wider/shorter aspect than the rest)
+        asps  = [b[3] / max(1, b[2]) for b in grp]
+        med_a = sorted(asps)[n // 2]
+        n_called = sum(
+            1 for a in asps
+            if abs(a - med_a) / max(0.01, med_a) > 0.25
+        )
+
+        # Infer meld size: if we have clearly 2× the called tiles of a single
+        # meld, use 3-tile chunks; otherwise fall back to simple thirds.
+        chunk = 3
+        if n_called >= 2 and n % n_called == 0:
+            # e.g. 6 tiles × 2 called → each meld has 3 tiles
+            chunk = n // n_called
+
+        # Build chunks; if the last piece is undersized, absorb it into prev.
+        chunks = [grp[i : i + chunk] for i in range(0, n, chunk)]
+        while len(chunks) > 1 and len(chunks[-1]) < 3:
+            last = chunks.pop()
+            chunks[-1].extend(last)
+        return [c for c in chunks if len(c) >= 3]
+
+    expanded: list[list[tuple]] = []
+    for g in groups:
+        expanded.extend(_split_oversized(g))
+    groups = expanded
+
+    melds: list[Meld] = []
+    for group in groups:
+        if len(group) < 3:
+            continue   # too few tiles to be a valid meld
+
+        # Identify the called tile: the one whose aspect ratio (h/w) differs
+        # most from the group median (it was rotated an extra 90°)
+        aspects = [b[3] / max(1, b[2]) for b in group]
+        med_asp = sorted(aspects)[len(aspects) // 2]
+        called_idx = None
+        max_diff = 0.0
+        for i, asp in enumerate(aspects):
+            diff = abs(asp - med_asp) / max(0.01, med_asp)
+            if diff > 0.25 and diff > max_diff:
+                max_diff = diff
+                called_idx = i
+
+        tiles_out: list[Tile | None] = []
+        confidences: list[float] = []
+        for x, y, bw, bh in group:
+            t_img = crop[y:y + bh, x:x + bw]
+            t, dbg = _recognize_meld_tile(t_img, label_templates)
+            tiles_out.append(t)
+            confidences.append(dbg.get("confidence", 0.0))
+
+        # Pon / kan majority-vote correction.
+        #
+        # A pon is always 3 identical tiles; a kan is 4.  When one tile is
+        # mis-recognised (e.g. the called tile's label is in an unusual
+        # position), the two/three correct tiles form a clear majority.
+        # Replace any outlier with the majority tile.
+        #
+        # Guard against chii mis-application: if an outlier tile is sequential
+        # to the majority tile (same suit, value ±1) that indicates a chii, not
+        # a pon with a misread.  In that case we skip the override so the chii
+        # tiles are preserved as-is.
+        from collections import Counter
+        valid = [(t, i) for i, t in enumerate(tiles_out) if t is not None]
+        if valid:
+            counts = Counter(t for t, _ in valid)
+            majority_tile, majority_count = counts.most_common(1)[0]
+            if majority_count >= 2:
+                outliers = [t for t in tiles_out
+                            if t is not None and t != majority_tile]
+                # Chii is only possible with numbered suits (man/pin/sou).
+                # Honour tiles (winds, dragons) can never form a chii, so the
+                # sequential guard must not fire for them.
+                _numbered = {Suit.MAN, Suit.PIN, Suit.SOU}
+                is_chii_pattern = (
+                    majority_tile.suit in _numbered
+                    and any(
+                        o.suit == majority_tile.suit
+                        and abs(o.value - majority_tile.value) <= 2
+                        for o in outliers
+                    )
+                )
+                if not is_chii_pattern:
+                    for i, t in enumerate(tiles_out):
+                        if t != majority_tile:
+                            tiles_out[i] = majority_tile
+
+        melds.append(Meld(tiles=tiles_out, called_tile_idx=called_idx))
+
+    return melds
+
+
+def recognize_melds(
     img: np.ndarray,
     region: dict,
-    rotation_cw: int = 0,
+    rotation_cw: int,
+    label_templates: dict,
     debug_prefix: str | None = None,
-) -> int:
-    """
-    Count tiles in an opponent's open meld area.
-    Returns total tile count (multiple of 3 or 4; 0 = no calls).
+) -> list[Meld]:
+    """Detect and identify all open melds in a player's meld region.
+
+    rotation_cw: same convention as ``recognize_discards``
+                 self=0, top=180, left=270, right=90
     """
     crop = _crop(img, region)
     rot  = _ROTATIONS.get(rotation_cw)
@@ -432,33 +779,15 @@ def count_opponent_melds(
     if debug_prefix:
         cv2.imwrite(f"{debug_prefix}_meld_crop.png", crop)
 
-    mh, mw   = crop.shape[:2]
-    blur_k   = max(5, int(mh * 0.10)) | 1
-    gray     = cv2.cvtColor(cv2.GaussianBlur(crop, (blur_k, blur_k), 0), cv2.COLOR_BGR2GRAY)
-    gray_raw = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    boxes = segment_meld_tiles(crop)
 
-    _, mask  = cv2.threshold(gray, _MELD_BRIGHTNESS, 255, cv2.THRESH_BINARY)
-    ew       = max(3, int(mw * 0.004))
-    kernel   = cv2.getStructuringElement(cv2.MORPH_RECT, (ew, 1))
-    mask     = cv2.dilate(cv2.erode(mask, kernel, iterations=2), kernel, iterations=1)
+    if debug_prefix:
+        vis = crop.copy()
+        for x, y, bw, bh in boxes:
+            cv2.rectangle(vis, (x, y), (x + bw, y + bh), (0, 255, 128), 1)
+        cv2.imwrite(f"{debug_prefix}_meld_vis.png", vis)
 
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    tiles = []
-    for cnt in contours:
-        x, y, bw, bh = cv2.boundingRect(cnt)
-        aspect = max(bw, bh) / max(1, min(bw, bh))
-        if bw * bh >= _MELD_MIN_AREA and aspect <= 2.5:
-            if cv2.mean(gray_raw[y:y + bh, x:x + bw])[0] >= 130:
-                tiles.append((x, y, bw, bh))
-
-    if len(tiles) >= 3:
-        med_w  = sorted(t[2] for t in tiles)[len(tiles) // 2]
-        tiles  = [t for t in tiles if t[2] >= med_w * 0.35]
-
-    count   = len(tiles)
-    if count == 0:
-        return 0
-    return max(0, round(count / 3) * 3)
+    return _group_into_melds(boxes, crop, label_templates)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1148,13 +1477,15 @@ def recognize_game_state(
     state.right_state.discards = recognize_discards(
         img, RIGHT_DISCARD, 90,  label_templates, dbg and f"{dbg}_right")
 
-    # --- Opponent melds ---
-    state.top_state.meld_count   = count_opponent_melds(
-        img, TOP_MELD,   0,   dbg and f"{dbg}_top")
-    state.left_state.meld_count  = count_opponent_melds(
-        img, LEFT_MELD,  270, dbg and f"{dbg}_left")
-    state.right_state.meld_count = count_opponent_melds(
-        img, RIGHT_MELD, 90,  dbg and f"{dbg}_right")
+    # --- All player melds ---
+    state.self_state.melds  = recognize_melds(
+        img, SELF_MELD,  0,   label_templates, dbg and f"{dbg}_self")
+    state.top_state.melds   = recognize_melds(
+        img, TOP_MELD,   180, label_templates, dbg and f"{dbg}_top")
+    state.left_state.melds  = recognize_melds(
+        img, LEFT_MELD,  270, label_templates, dbg and f"{dbg}_left")
+    state.right_state.melds = recognize_melds(
+        img, RIGHT_MELD, 90,  label_templates, dbg and f"{dbg}_right")
 
     # --- Riichi ---
     state.self_state.riichi  = detect_riichi(img, SELF_RIICHI)
@@ -1206,10 +1537,12 @@ def print_state(gs: GameState):
         ("Right", gs.right_state),
     ]:
         riichi    = " [RIICHI]" if ps.riichi else ""
-        melds     = f"  melds={ps.meld_count}" if ps.meld_count else ""
         wind_str  = f"  seat={ps.seat_wind}" if ps.seat_wind else ""
         score_str = f"  score={ps.score}" if ps.score is not None else ""
-        print(f"  {seat:5s}{riichi}{melds}{wind_str}{score_str}")
+        print(f"  {seat:5s}{riichi}{wind_str}{score_str}")
+        if ps.melds:
+            melds_str = "  ".join(str(m) for m in ps.melds)
+            print(f"         melds:    {melds_str}")
         print(f"         discards: {_fmt(ps.discards)}")
     print(f"{'='*62}\n")
 

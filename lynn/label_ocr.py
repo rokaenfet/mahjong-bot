@@ -23,7 +23,11 @@ LABEL_TEMPLATES_DIR = Path(__file__).parent / "label_templates"
 CALIBRATION_FILE = LABEL_TEMPLATES_DIR / "calibration.json"
 
 LABEL_X_START = 0.55
-LABEL_Y_END = 0.40
+# Extended to 0.50 so that landscape-oriented meld tiles (e.g. the face-strip
+# visible on the top player's melds) whose label sits at ~40–50 % of height
+# are still captured.  For normal portrait tiles the extra area is blank white
+# and the largest-component selector in _normalize_label still finds the glyph.
+LABEL_Y_END = 0.50
 
 SUIT_MAP = {"man": Suit.MAN, "pin": Suit.PIN, "sou": Suit.SOU}
 
@@ -53,15 +57,44 @@ def _normalize_label(label_crop: np.ndarray, extract_char: bool = True) -> np.nd
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
 
-        # Find the largest connected component (the label character).
-        # Using connectedComponentsWithStats instead of findNonZero+boundingRect
-        # so that tile-body artifacts (e.g. the decorative cross visible below
-        # the "G" label on a discard-sized Hatsu tile) are ignored — they form
-        # separate, smaller components that lose to the main glyph by area.
+        # Find the best connected component (the label character).
+        # The label indicator is always anchored to the TOP-RIGHT corner of the
+        # label zone.  Tile-body graphics (bamboo sticks, 発 kanji) that leak
+        # into the left side of the zone must be ignored.
+        #
+        # Scoring: reward components that are (a) far right and (b) near the top.
+        #   score = x_right_norm * 0.6 + (1 - y_top_norm) * 0.4
+        # where x_right_norm = (x + w) / zone_width  and
+        #       y_top_norm   = y / zone_height.
+        #
+        # Candidate filtering (all three conditions required):
+        #   • area  ≥ 5 % of zone area  (removes single-pixel noise)
+        #   • width ≥ 20 % of zone_w    (removes thin edge-shadow artifacts)
+        #   • height ≥ 15 % of zone_h   (removes hairline horizontal lines)
+        # If no component passes the size filters we fall back to the largest.
+        # This is backward-compatible: for normal tiles only one significant
+        # component exists, so it wins trivially.
         n_comp, _, stats, _ = cv2.connectedComponentsWithStats(binary)
         if n_comp > 1:
-            # stats rows: [x, y, w, h, area]; skip row 0 (background)
-            best = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
+            zone_h, zone_w = binary.shape[:2]
+            min_area  = max(4,   zone_h * zone_w * 0.05)
+            min_width = max(3,   zone_w * 0.20)
+            min_height= max(2,   zone_h * 0.15)
+
+            cands = [i + 1 for i, s in enumerate(stats[1:])
+                     if (s[cv2.CC_STAT_AREA]   >= min_area
+                         and s[cv2.CC_STAT_WIDTH]  >= min_width
+                         and s[cv2.CC_STAT_HEIGHT] >= min_height)]
+            if not cands:           # everything is noise — fall back to largest
+                cands = [int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1]
+
+            def _top_right_score(idx: int) -> float:
+                s = stats[idx]
+                x_right = (s[cv2.CC_STAT_LEFT] + s[cv2.CC_STAT_WIDTH]) / max(1, zone_w)
+                y_top   = s[cv2.CC_STAT_TOP] / max(1, zone_h)
+                return x_right * 0.6 + (1.0 - y_top) * 0.4
+
+            best = max(cands, key=_top_right_score)
             x  = stats[best, cv2.CC_STAT_LEFT]
             y  = stats[best, cv2.CC_STAT_TOP]
             bw = stats[best, cv2.CC_STAT_WIDTH]
@@ -319,6 +352,18 @@ def recognize_tile(tile_img: np.ndarray, templates: dict[str, list[np.ndarray]])
                 debug["confidence"] = best_digit_score
                 value = int(label_char)
                 return Tile(SUIT_MAP[suit_guess], value), debug
+            # Dragon colour override: wind tiles are white/neutral — if the
+            # suit detector sees a distinctively coloured tile body (green=sou
+            # for Hatsu, red=man for Chun), the label glyph was confused with
+            # a wind letter but the tile is actually a dragon.  This is the
+            # primary recovery path when meld-scale rendering makes the "Ht"
+            # two-glyph label's "H" component resemble "N" at 28×28.
+            if suit_guess == "sou":
+                label_char = "Ht"
+                debug["label"] = label_char
+            elif suit_guess == "man":
+                label_char = "Ch"
+                debug["label"] = label_char
         suit, value = LABEL_TO_HONOR[label_char]
         return Tile(suit, value), debug
 
