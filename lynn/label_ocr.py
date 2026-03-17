@@ -23,7 +23,11 @@ LABEL_TEMPLATES_DIR = Path(__file__).parent / "label_templates"
 CALIBRATION_FILE = LABEL_TEMPLATES_DIR / "calibration.json"
 
 LABEL_X_START = 0.55
-LABEL_Y_END = 0.40
+# Extended to 0.50 so that landscape-oriented meld tiles (e.g. the face-strip
+# visible on the top player's melds) whose label sits at ~40–50 % of height
+# are still captured.  For normal portrait tiles the extra area is blank white
+# and the largest-component selector in _normalize_label still finds the glyph.
+LABEL_Y_END = 0.50
 
 SUIT_MAP = {"man": Suit.MAN, "pin": Suit.PIN, "sou": Suit.SOU}
 
@@ -53,13 +57,51 @@ def _normalize_label(label_crop: np.ndarray, extract_char: bool = True) -> np.nd
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2, 2))
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
 
-        # Find the largest connected component (the label character)
-        coords = cv2.findNonZero(binary)
-        if coords is not None and len(coords) > 5:
-            x, y, bw, bh = cv2.boundingRect(coords)
+        # Find the best connected component (the label character).
+        # The label indicator is always anchored to the TOP-RIGHT corner of the
+        # label zone.  Tile-body graphics (bamboo sticks, 発 kanji) that leak
+        # into the left side of the zone must be ignored.
+        #
+        # Scoring: reward components that are (a) far right and (b) near the top.
+        #   score = x_right_norm * 0.6 + (1 - y_top_norm) * 0.4
+        # where x_right_norm = (x + w) / zone_width  and
+        #       y_top_norm   = y / zone_height.
+        #
+        # Candidate filtering (all three conditions required):
+        #   • area  ≥ 5 % of zone area  (removes single-pixel noise)
+        #   • width ≥ 20 % of zone_w    (removes thin edge-shadow artifacts)
+        #   • height ≥ 15 % of zone_h   (removes hairline horizontal lines)
+        # If no component passes the size filters we fall back to the largest.
+        # This is backward-compatible: for normal tiles only one significant
+        # component exists, so it wins trivially.
+        n_comp, _, stats, _ = cv2.connectedComponentsWithStats(binary)
+        if n_comp > 1:
+            zone_h, zone_w = binary.shape[:2]
+            min_area  = max(4,   zone_h * zone_w * 0.05)
+            min_width = max(3,   zone_w * 0.20)
+            min_height= max(2,   zone_h * 0.15)
+
+            cands = [i + 1 for i, s in enumerate(stats[1:])
+                     if (s[cv2.CC_STAT_AREA]   >= min_area
+                         and s[cv2.CC_STAT_WIDTH]  >= min_width
+                         and s[cv2.CC_STAT_HEIGHT] >= min_height)]
+            if not cands:           # everything is noise — fall back to largest
+                cands = [int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1]
+
+            def _top_right_score(idx: int) -> float:
+                s = stats[idx]
+                x_right = (s[cv2.CC_STAT_LEFT] + s[cv2.CC_STAT_WIDTH]) / max(1, zone_w)
+                y_top   = s[cv2.CC_STAT_TOP] / max(1, zone_h)
+                return x_right * 0.6 + (1.0 - y_top) * 0.4
+
+            best = max(cands, key=_top_right_score)
+            x  = stats[best, cv2.CC_STAT_LEFT]
+            y  = stats[best, cv2.CC_STAT_TOP]
+            bw = stats[best, cv2.CC_STAT_WIDTH]
+            bh = stats[best, cv2.CC_STAT_HEIGHT]
             pad = 2
-            x = max(0, x - pad)
-            y = max(0, y - pad)
+            x  = max(0, x - pad)
+            y  = max(0, y - pad)
             bw = min(binary.shape[1] - x, bw + 2 * pad)
             bh = min(binary.shape[0] - y, bh + 2 * pad)
             char_roi = binary[y:y + bh, x:x + bw]
@@ -81,6 +123,20 @@ def _detect_suit(tile_img: np.ndarray) -> str:
     dark_mask = (v_ch < 120) & (v_ch > 20)
     dark_pct = dark_mask.sum() / total
 
+    # Compute label-zone colour signals early — the top-right corner is a reliable
+    # per-suit indicator even when the full-tile stats are diluted or ambiguous.
+    th, tw = tile_img.shape[:2]
+    label_zone = tile_img[:int(th * 0.40), int(tw * 0.55):]
+    red_l = green_l = blue_l = 0.0
+    if label_zone.size > 0:
+        hsv_l = cv2.cvtColor(label_zone, cv2.COLOR_BGR2HSV)
+        h_l, s_l, _ = cv2.split(hsv_l)
+        sm_l = s_l > 50
+        lz_tot = max(1, sm_l.size)
+        red_l   = (sm_l & ((h_l <= 12) | (h_l >= 168))).sum() / lz_tot
+        green_l = (sm_l & (h_l >= 35) & (h_l <= 85)).sum() / lz_tot
+        blue_l  = (sm_l & (h_l >= 86) & (h_l <= 140)).sum() / lz_tot
+
     # Very dominant green (little red present) → sou, regardless of dark content
     if green > 0.04 and green > red * 3.0:
         return "sou"
@@ -88,6 +144,23 @@ def _detect_suit(tile_img: np.ndarray) -> str:
     # (handles muted bamboo tiles where green/red ratio is 1.2–3x)
     if green > 0.05 and green > red * 1.2 and dark_pct > 0.09:
         return "sou"
+    # Sou via label zone: green dominates in the label area even when full-tile
+    # stats are muddied by mixed-colour bamboo (green ≈ red in tile body)
+    if green_l > 0.10 and green_l > red_l * 1.5:
+        return "sou"
+
+    # Multi-colour bamboo fallback (e.g. 9s, 8s): tile art has mixed green+red so
+    # the 3× and 1.2× thresholds above are not met, but green still exceeds red
+    # with significant dark structure.  Blue guard avoids catching pin tiles whose
+    # circles can produce high dark_pct.
+    if green > 0.08 and green > red and dark_pct > 0.08 and blue < 0.10:
+        return "sou"
+
+    # Dominant blue → pin (Mahjong Soul pin circles are rendered in deep blue/purple)
+    if blue > 0.15 and blue > red * 2 and blue > green * 2:
+        return "pin"
+    if blue_l > 0.10 and blue_l > red_l * 2 and blue_l > green_l * 2:
+        return "pin"
 
     if red > 0.04 and red > green * 2:
         # Pin tiles have dark circle patterns giving a high dark-to-red ratio
@@ -96,12 +169,21 @@ def _detect_suit(tile_img: np.ndarray) -> str:
             return "pin"
         return "man"
 
-    # Low saturation with dark structured patterns → pin
+    # Low saturation with dark structured patterns → pin.
+    # This must come BEFORE the label-zone man check: a pin dora indicator tile
+    # has dark_pct > 0.10 + sat < 0.10, but also some red in its label zone
+    # from the golden dora frame — we must not misclassify it as man.
     if dark_pct > 0.10:
         sat_pct = sat_mask.sum() / total
         if sat_pct < 0.10:
             return "pin"
         return "honor"
+
+    # Label-zone red → man.  Only reaches here when dark_pct ≤ 0.10, which
+    # rules out pin tiles (their circles produce dark content).  This catches
+    # man dora indicator tiles whose full-tile red is diluted by white background.
+    if red_l > 0.05 and red_l > green_l:
+        return "man"
 
     return "honor"
 
@@ -223,13 +305,74 @@ def recognize_tile(tile_img: np.ndarray, templates: dict[str, list[np.ndarray]])
 
     debug = {"label": label_char, "confidence": confidence, "suit_guess": suit_guess}
 
-    # Honor tiles
+    # Honor tiles — use body colour to disambiguate visually-similar label glyphs.
+    #
+    # Dragon tiles (reliable colour signal):
+    #   Hatsu → distinctive green body (sou)
+    #   Chun  → distinctive red body (man)
+    #
+    # Wind tiles (E/S/W/N): body colour is NOT reliable — _detect_suit often
+    # returns "man"/"pin" for wind tiles due to coloured label text.  However,
+    # some digit glyphs can be confused with letters (e.g. "5" ≈ "S" at 28×28).
+    # Guard: if a wind letter wins the label match but a DIGIT is nearly as
+    # strong (within _WIND_DIGIT_MARGIN) AND the tile body looks like a numbered
+    # suit, prefer the digit.  This handles the "5p misidentified as South" case
+    # without breaking genuine South/North/etc. tiles (where no digit scores
+    # close to the letter and/or the suit is "honor").
+    _WIND_DIGIT_MARGIN = 0.06
     if label_char in LABEL_TO_HONOR:
+        if label_char == "Ch" and suit_guess == "sou":
+            label_char = "Ht"
+            debug["label"] = label_char
+        elif label_char == "Ht" and suit_guess == "man":
+            label_char = "Ch"
+            debug["label"] = label_char
+        elif label_char in ("E", "S", "W", "N") and suit_guess in SUIT_MAP:
+            # Check whether any digit template scores close to the winning letter
+            best_digit_score = -1.0
+            best_digit_char  = None
+            for lc2, tmpls2 in templates.items():
+                if not (lc2.isdigit() and 1 <= int(lc2) <= 9):
+                    continue
+                for tmpl2 in tmpls2:
+                    padded2 = cv2.copyMakeBorder(
+                        tmpl2, _MATCH_PAD, _MATCH_PAD, _MATCH_PAD, _MATCH_PAD,
+                        cv2.BORDER_CONSTANT, value=0,
+                    )
+                    lc2_crop = _crop_label(tile_img)
+                    query    = _normalize_label(lc2_crop)
+                    sc2 = cv2.matchTemplate(padded2, query, cv2.TM_CCOEFF_NORMED).max()
+                    if sc2 > best_digit_score:
+                        best_digit_score = sc2
+                        best_digit_char  = lc2
+            if best_digit_char and (confidence - best_digit_score) < _WIND_DIGIT_MARGIN:
+                # Digit is nearly as good as the wind letter → treat as digit
+                label_char = best_digit_char
+                debug["label"] = label_char
+                debug["confidence"] = best_digit_score
+                value = int(label_char)
+                return Tile(SUIT_MAP[suit_guess], value), debug
+            # Dragon colour override: wind tiles are white/neutral — if the
+            # suit detector sees a distinctively coloured tile body (green=sou
+            # for Hatsu, red=man for Chun), the label glyph was confused with
+            # a wind letter but the tile is actually a dragon.  This is the
+            # primary recovery path when meld-scale rendering makes the "Ht"
+            # two-glyph label's "H" component resemble "N" at 28×28.
+            if suit_guess == "sou":
+                label_char = "Ht"
+                debug["label"] = label_char
+            elif suit_guess == "man":
+                label_char = "Ch"
+                debug["label"] = label_char
         suit, value = LABEL_TO_HONOR[label_char]
         return Tile(suit, value), debug
 
-    # Numbered tiles
+    # Numbered tiles — require a minimum label confidence to avoid random matches
+    # on clipped or otherwise unusable tile images.
+    _MIN_LABEL_CONF = 0.10
     if label_char.isdigit() and 1 <= int(label_char) <= 9:
+        if confidence < _MIN_LABEL_CONF:
+            return None, debug
         value = int(label_char)
         if suit_guess in SUIT_MAP:
             return Tile(SUIT_MAP[suit_guess], value), debug

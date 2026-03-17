@@ -1,0 +1,43 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls /c/Users/tokoyol/Desktop/mahjong-bot/mahjong-bot/lynn/mahjongsoul*.png /c/Users/tokoyol/Desktop/mahjong-bot/mahjong-bot/lynn/image.png)",
+      "Bash(ls /c/Users/tokoyol/Desktop/mahjong-bot/mahjong-bot/lynn/mahjongsoul4_*.png)",
+      "Bash(ls /c/Users/tokoyol/Desktop/mahjong-bot/mahjong-bot/*.png)",
+      "Bash(ls /c/Users/tokoyol/Desktop/mahjong-bot/mahjong-bot/mahjongsoul4_*.png)",
+      "Bash(python lynn/game_state.py lynn/mahjongsoul4.png --show-regions)",
+      "Bash(python lynn/game_state.py lynn/mahjongsoul4.png --debug)",
+      "Bash(python game_state.py ..mahjongsoul.png --debug)",
+      "Read(//mnt/c/Users/tokoyol/Desktop/mahjong-bot/mahjong-bot/**)",
+      "Bash(python game_state.py ../mahjongsoul.png --debug)",
+      "Bash(python \"C:\\\\Users\\\\tokoyol\\\\Desktop\\\\mahjong-bot\\\\mahjong-bot\\\\lynn\\\\game_state.py\" \"C:\\\\Users\\\\tokoyol\\\\Desktop\\\\mahjong-bot\\\\mahjong-bot\\\\mahjongsoul.png\" --debug)",
+      "Bash(python \"C:\\\\Users\\\\tokoyol\\\\Desktop\\\\mahjong-bot\\\\mahjong-bot\\\\lynn\\\\game_state.py\" \"C:\\\\Users\\\\tokoyol\\\\Desktop\\\\mahjong-bot\\\\mahjong-bot\\\\lynn\\\\mahjongsoul3.png\" --debug)",
+      "Bash(python \"C:\\\\Users\\\\tokoyol\\\\Desktop\\\\mahjong-bot\\\\mahjong-bot\\\\lynn\\\\game_state.py\" \"C:\\\\Users\\\\tokoyol\\\\Desktop\\\\mahjong-bot\\\\mahjong-bot\\\\lynn\\\\image.png\" --debug)",
+      "Bash(python \"C:\\\\Users\\\\tokoyol\\\\Desktop\\\\mahjong-bot\\\\mahjong-bot\\\\lynn\\\\game_state.py\" \"C:\\\\Users\\\\tokoyol\\\\Desktop\\\\mahjong-bot\\\\mahjong-bot\\\\lynn\\\\mahjongsoul3.png\" --show-regions)",
+      "Bash(dir \"C:\\\\Users\\\\tokoyol\\\\Desktop\\\\mahjong-bot\\\\mahjong-bot\\\\lynn\\\\debug_regions.png\")",
+      "Bash(python game_state.py mahjongsoul3.png --show-regions)",
+      "Bash(python game_state.py mahjongsoul3.png --debug)",
+      "Bash(python game_state.py image.png --debug)",
+      "Bash(python game_state.py image.png)",
+      "Bash(python game_state.py image.png --calibrate-round East1)",
+      "Bash(python game_state.py image.png --calibrate-wall 67)",
+      "Bash(python game_state.py image.png --calibrate-score self 25000 --debug)",
+      "Bash(python game_state.py mahjongsoul3.png --calibrate-wall 58)",
+      "Bash(python game_state.py image.png --calibrate-score top 25000 --debug)",
+      "Bash(python game_state.py image.png --calibrate-score left 25000 --debug)",
+      "Bash(python game_state.py image.png --calibrate-score right 25000 --debug)",
+      "Bash(del label_templateswalld5.png label_templateswalld6.png label_templateswalld7.png label_templateswalld8.png)",
+      "Bash(python game_state.py mahjongsoul3.png)",
+      "Bash(python -c \":*)",
+      "Bash(rm -f \"C:/Users/tokoyol/Desktop/mahjong-bot/mahjong-bot/lynn/label_templates/score_digits/\"*.png)",
+      "Bash(python game_state.py image.png --calibrate-score self 25000)",
+      "Bash(ls C:UserstokoyolDesktopmahjong-botmahjong-botlynn*.png)",
+      "Bash(ls *.png)",
+      "Bash(python -:*)",
+      "Bash(for f:*)",
+      "Bash(do echo:*)",
+      "Bash(python game_state.py mahjongsoul6.png --debug)",
+      "Bash(python game_state.py mahjongsoul6.png --calibrate-wall 55)"
+    ]
+  }
+}
