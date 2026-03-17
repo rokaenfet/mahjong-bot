@@ -79,7 +79,9 @@ The project is structured into five core components:
       - [ ] Check for all possible Riichi (best card to discard in terms of number of wait tiles)
     - [ ] Decide An-Kan
     - [ ] Decide discard tile
-      - [ ] Greedily find best discard for maximum Uke-ire / Shanten
+      - [ ] Is the opponent Tenpai?
+        - [ ] *NO*: Greedily find best discard for maximum Uke-ire / Shanten
+        - [ ] *YES*: Get expected score of opponent, and calculate safest hand
   - [ ] On opponent's turns...
     - [ ] Decide Kan
       - [ ] Does it improve Uke-ire / Shanten?
@@ -120,7 +122,8 @@ The project is structured into five core components:
 
 # Note
 [2 man CFR mahjong paper](https://arxiv.org/pdf/2307.12087)
-[naga ai] (https://dmv.nico/en/articles/mahjong_ai_naga/)
+[naga ai](https://dmv.nico/en/articles/mahjong_ai_naga/)
+[mjai dataset](https://github.com/NikkeTryHard/tenhou-to-mjai)
 
 # How to run code
 1. `./` root dir
