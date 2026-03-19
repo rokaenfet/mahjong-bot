@@ -130,7 +130,7 @@ SCORE_RIGHT_SUB = dict(y_start=0.10, y_end=0.28, x_start=0.58, x_end=0.70)
 SEAT_LEFT_SUB   = dict(y_start=0.38, y_end=0.58, x_start=0.00, x_end=0.16)
 SEAT_RIGHT_SUB  = dict(y_start=0.38, y_end=0.58, x_start=0.84, x_end=1.00)
 SEAT_TOP_SUB    = dict(y_start=0.00, y_end=0.10, x_start=0.00, x_end=0.16)
-SEAT_SELF_SUB   = dict(y_start=0.00, y_end=0.10, x_start=0.84, x_end=1.00)
+SEAT_SELF_SUB   = dict(y_start=0.64, y_end=0.84, x_start=0.04, x_end=0.22)
 
 # Template directories for text elements
 _HERE               = Path(__file__).parent
@@ -275,6 +275,14 @@ def segment_discard_tiles(
         med_h = sorted(b[3] for b in boxes)[len(boxes) // 2]
         boxes = [b for b in boxes if b[3] >= med_h * 0.4]
 
+    # Remove tiles clipped by the crop boundary.  After rotation, a tile that
+    # straddles the original region edge will appear with its bounding box
+    # touching the image border (x=0 or y=0).  Genuine discard tiles always
+    # have a few pixels of margin from the edge because the crop regions are
+    # calibrated with padding around the actual tile grid.
+    _EDGE_MIN = 4
+    boxes = [b for b in boxes if b[0] >= _EDGE_MIN and b[1] >= _EDGE_MIN]
+
     # Group boxes into rows by overlapping y-centres
     boxes.sort(key=lambda b: b[1])
     ref_h = max(b[3] for b in boxes) if boxes else 1
@@ -331,16 +339,24 @@ def recognize_discards(
     tile_imgs = extract_tile_images(crop, boxes)
 
     tiles: list[Tile | None] = []
+    tile_imgs_trimmed: list[np.ndarray] = []
     for t_img in tile_imgs:
+        # Discard tiles share the same 3-D perspective rendering as meld tiles:
+        # a dark shadow band can appear at the top of the face crop and pollute
+        # the label zone.  Strip it the same way as in _recognize_meld_tile.
+        t_img = _trim_gray_top(t_img)
+        tile_imgs_trimmed.append(t_img)
         tile, _ = recognize_tile(t_img, label_templates)
         tiles.append(tile)
 
     if debug_prefix:
         vis = crop.copy()
-        for (x, y, bw, bh), tile in zip(boxes, tiles):
+        for i, ((x, y, bw, bh), tile) in enumerate(zip(boxes, tiles)):
             cv2.rectangle(vis, (x, y), (x + bw, y + bh), (0, 255, 0), 1)
             label = str(tile) if tile else "?"
             cv2.putText(vis, label, (x, y - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.35, (0, 255, 0), 1)
+            # Save each individual tile crop as cur_NNN.png for calibration
+            cv2.imwrite(f"{debug_prefix}_tile_{i:02d}.png", tile_imgs_trimmed[i])
         cv2.imwrite(f"{debug_prefix}_discard_vis.png", vis)
 
     return tiles
@@ -1332,21 +1348,40 @@ def recognize_scores(
 _SEAT_WIND_LETTERS = {"E": "East", "S": "South", "W": "West", "N": "North"}
 
 
-def _load_seat_wind_templates() -> dict[str, np.ndarray]:
-    tmpls: dict[str, np.ndarray] = {}
+def _load_seat_wind_templates() -> dict[str, list[np.ndarray]]:
+    """Return {letter: [template, ...]} supporting multiple templates per letter."""
+    tmpls: dict[str, list[np.ndarray]] = {}
     if not SEAT_WIND_TMPL_DIR.exists():
         return tmpls
     for p in SEAT_WIND_TMPL_DIR.glob("*.png"):
+        # Filename format: E.png  or  E_01.png  (letter is always the first char)
+        letter = p.stem[0].upper()
+        if letter not in _SEAT_WIND_LETTERS:
+            continue
         img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
         if img is not None:
-            tmpls[p.stem] = img   # "E", "S", "W", "N"
+            tmpls.setdefault(letter, []).append(img)
     return tmpls
 
 
 def _badge_letter_mask(img: np.ndarray) -> np.ndarray:
-    """Binary mask isolating the white/bright letter inside a seat-wind badge."""
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    _, mask = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
+    """Binary mask isolating content inside a seat-wind badge.
+
+    Uses a non-blue HSV mask so that coloured letters (e.g. red/orange East
+    badge) are captured in addition to plain white ones.  Blue game-board
+    background (H≈100-130) is excluded; everything else (H<90 or H>130,
+    or low-saturation bright pixels) is kept.
+    """
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+    # Keep pixels that are NOT the blue/teal game background:
+    #   - non-blue hue  (H < 90 or H > 130)  with any saturation
+    #   - OR bright/white pixels (V > 180 with low saturation)
+    non_blue_hue = ((h < 90) | (h > 130)).astype(np.uint8) * 255
+    bright_white = ((v > 180) & (s < 60)).astype(np.uint8) * 255
+    # Require some minimum value so we don't catch near-black shadows
+    has_value = (v > 60).astype(np.uint8) * 255
+    mask = cv2.bitwise_and(cv2.bitwise_or(non_blue_hue, bright_white), has_value)
     return mask
 
 
@@ -1376,14 +1411,21 @@ def calibrate_seat_wind(img: np.ndarray, seat: str, wind_letter: str):
     if coords is None:
         print(f"No bright content found in {seat} seat-wind region.")
         cv2.imwrite(f"debug_seat_{seat}.png", crop)
+        # Also save the full centre panel so the badge location can be found
+        cv2.imwrite(f"debug_seat_{seat}_panel.png", panel)
         return
 
     x, y, bw, bh = cv2.boundingRect(coords)
     normalized = cv2.resize(mask[y:y + bh, x:x + bw], (24, 24))
     SEAT_WIND_TMPL_DIR.mkdir(parents=True, exist_ok=True)
-    out = SEAT_WIND_TMPL_DIR / f"{wind_letter.upper()}.png"
+    letter = wind_letter.upper()
+    # Use numbered filenames so multiple screenshots can each contribute a
+    # template without overwriting earlier ones: E_01.png, E_02.png, …
+    existing = sorted(SEAT_WIND_TMPL_DIR.glob(f"{letter}_*.png"))
+    idx = len(existing) + 1
+    out = SEAT_WIND_TMPL_DIR / f"{letter}_{idx:02d}.png"
     cv2.imwrite(str(out), normalized)
-    print(f"Saved seat-wind template '{wind_letter}' -> {out}")
+    print(f"Saved seat-wind template '{letter}' -> {out}")
 
 
 def recognize_seat_winds(
@@ -1426,13 +1468,14 @@ def recognize_seat_winds(
         query = cv2.resize(mask[y:y + bh, x:x + bw], (24, 24)).astype(np.float32)
 
         best_letter, best_score = None, -1.0
-        for letter, tmpl in seat_templates.items():
-            padded = cv2.copyMakeBorder(
-                tmpl.astype(np.float32), 2, 2, 2, 2, cv2.BORDER_CONSTANT
-            )
-            score = float(cv2.matchTemplate(padded, query, cv2.TM_CCOEFF_NORMED).max())
-            if score > best_score:
-                best_score, best_letter = score, letter
+        for letter, tmpls in seat_templates.items():
+            for tmpl in tmpls:
+                padded = cv2.copyMakeBorder(
+                    tmpl.astype(np.float32), 2, 2, 2, 2, cv2.BORDER_CONSTANT
+                )
+                score = float(cv2.matchTemplate(padded, query, cv2.TM_CCOEFF_NORMED).max())
+                if score > best_score:
+                    best_score, best_letter = score, letter
 
         if best_letter and best_score >= 0.55:
             winds[seat] = _SEAT_WIND_LETTERS.get(best_letter)
@@ -1530,16 +1573,19 @@ def print_state(gs: GameState):
     print(f"  Wall  : {gs.wall_count if gs.wall_count is not None else '?'} tiles")
     print(f"  Dora  : {_fmt(gs.doras)}  (indicators: {_fmt(gs.dora_indicators)})")
     print(f"{'='*62}")
-    for seat, ps in [
+    for pos, ps in [
         ("Self",  gs.self_state),
         ("Top",   gs.top_state),
         ("Left",  gs.left_state),
         ("Right", gs.right_state),
     ]:
+        if ps.seat_wind:
+            label = f"{ps.seat_wind}(self)" if pos == "Self" else ps.seat_wind
+        else:
+            label = pos
         riichi    = " [RIICHI]" if ps.riichi else ""
-        wind_str  = f"  seat={ps.seat_wind}" if ps.seat_wind else ""
         score_str = f"  score={ps.score}" if ps.score is not None else ""
-        print(f"  {seat:5s}{riichi}{wind_str}{score_str}")
+        print(f"  {label:10s}{riichi}{score_str}")
         if ps.melds:
             melds_str = "  ".join(str(m) for m in ps.melds)
             print(f"         melds:    {melds_str}")

@@ -165,6 +165,14 @@ def _detect_suit(tile_img: np.ndarray) -> str:
     if red > 0.04 and red > green * 2:
         # Pin tiles have dark circle patterns giving a high dark-to-red ratio
         # Man tiles have red characters but relatively little dark area
+        #
+        # High-pip pin tiles (e.g. 6p, 7p) have many red circles that push the
+        # overall red fraction very high, so dark_pct can fall below red * 1.2
+        # even though the dark ring outlines are significant.  Man character
+        # strokes are thin and keep dark_pct < 0.10 in practice; circle tiles
+        # with multiple large rings reliably produce dark_pct > 0.12.
+        if dark_pct > 0.12:
+            return "pin"
         if dark_pct > red * 1.2:
             return "pin"
         return "man"
@@ -319,7 +327,6 @@ def recognize_tile(tile_img: np.ndarray, templates: dict[str, list[np.ndarray]])
     # suit, prefer the digit.  This handles the "5p misidentified as South" case
     # without breaking genuine South/North/etc. tiles (where no digit scores
     # close to the letter and/or the suit is "honor").
-    _WIND_DIGIT_MARGIN = 0.06
     if label_char in LABEL_TO_HONOR:
         if label_char == "Ch" and suit_guess == "sou":
             label_char = "Ht"
@@ -328,42 +335,94 @@ def recognize_tile(tile_img: np.ndarray, templates: dict[str, list[np.ndarray]])
             label_char = "Ch"
             debug["label"] = label_char
         elif label_char in ("E", "S", "W", "N") and suit_guess in SUIT_MAP:
-            # Check whether any digit template scores close to the winning letter
-            best_digit_score = -1.0
-            best_digit_char  = None
-            for lc2, tmpls2 in templates.items():
-                if not (lc2.isdigit() and 1 <= int(lc2) <= 9):
-                    continue
-                for tmpl2 in tmpls2:
-                    padded2 = cv2.copyMakeBorder(
-                        tmpl2, _MATCH_PAD, _MATCH_PAD, _MATCH_PAD, _MATCH_PAD,
-                        cv2.BORDER_CONSTANT, value=0,
-                    )
-                    lc2_crop = _crop_label(tile_img)
-                    query    = _normalize_label(lc2_crop)
-                    sc2 = cv2.matchTemplate(padded2, query, cv2.TM_CCOEFF_NORMED).max()
-                    if sc2 > best_digit_score:
-                        best_digit_score = sc2
-                        best_digit_char  = lc2
-            if best_digit_char and (confidence - best_digit_score) < _WIND_DIGIT_MARGIN:
-                # Digit is nearly as good as the wind letter → treat as digit
-                label_char = best_digit_char
-                debug["label"] = label_char
-                debug["confidence"] = best_digit_score
-                value = int(label_char)
-                return Tile(SUIT_MAP[suit_guess], value), debug
-            # Dragon colour override: wind tiles are white/neutral — if the
-            # suit detector sees a distinctively coloured tile body (green=sou
-            # for Hatsu, red=man for Chun), the label glyph was confused with
-            # a wind letter but the tile is actually a dragon.  This is the
-            # primary recovery path when meld-scale rendering makes the "Ht"
-            # two-glyph label's "H" component resemble "N" at 28×28.
-            if suit_guess == "sou":
-                label_char = "Ht"
-                debug["label"] = label_char
-            elif suit_guess == "man":
-                label_char = "Ch"
-                debug["label"] = label_char
+            # Guard: measure red content in the label zone.
+            #
+            # In Mahjong Soul, numbered-tile corner indicators are RED for man
+            # tiles (and similarly coloured for pin/sou).  Wind-tile indicators
+            # are coloured per-wind (East=red, South=teal, West=blue, North=dark)
+            # but the body of the indicator character typically carries little to
+            # no RED hue.  The one exception is East (東, red character) — handled
+            # below via the confidence threshold on the dragon override.
+            #
+            # Rule: only apply the digit-override AND the dragon-colour-override
+            # when the label zone has measurable red (≥ 0.03 fraction of saturated
+            # pixels).  When red_lz is near zero the tile is almost certainly a
+            # genuine wind tile (South/West/North) or a Hatsu-body fake wind — in
+            # either case we trust the wind letter or the sou colour signal.
+            th, tw = tile_img.shape[:2]
+            lz = tile_img[:int(th * LABEL_Y_END), int(tw * LABEL_X_START):]
+            red_lz = 0.0
+            if lz.size > 0:
+                hsv_lz = cv2.cvtColor(lz, cv2.COLOR_BGR2HSV)
+                h_lz, s_lz, _ = cv2.split(hsv_lz)
+                sm_lz = s_lz > 50
+                lz_tot = max(1, sm_lz.size)
+                red_lz = (sm_lz & ((h_lz <= 12) | (h_lz >= 168))).sum() / lz_tot
+            _LABEL_ZONE_RED_THRESH = 0.03
+
+            if red_lz > _LABEL_ZONE_RED_THRESH:
+                # Label zone has red → could be a numbered tile whose label
+                # glyph resembles a wind letter.  Apply digit override.
+                best_digit_score = -1.0
+                best_digit_char  = None
+                for lc2, tmpls2 in templates.items():
+                    if not (lc2.isdigit() and 1 <= int(lc2) <= 9):
+                        continue
+                    for tmpl2 in tmpls2:
+                        padded2 = cv2.copyMakeBorder(
+                            tmpl2, _MATCH_PAD, _MATCH_PAD, _MATCH_PAD, _MATCH_PAD,
+                            cv2.BORDER_CONSTANT, value=0,
+                        )
+                        lc2_crop = _crop_label(tile_img)
+                        query    = _normalize_label(lc2_crop)
+                        sc2 = cv2.matchTemplate(padded2, query, cv2.TM_CCOEFF_NORMED).max()
+                        if sc2 > best_digit_score:
+                            best_digit_score = sc2
+                            best_digit_char  = lc2
+                # Strict override: digit beats wind outright → prefer digit.
+                strict = best_digit_char and best_digit_score >= confidence
+                # Lenient override: man-suit tile with moderate wind confidence
+                # and a decent digit match.  Handles numbered tiles (e.g. 5m, 7m)
+                # whose label glyph looks like a wind letter at discard scale or
+                # after 90° rotation — but only when the wind letter did NOT win
+                # with high confidence (≥ 0.80), which would indicate a real wind.
+                lenient = (
+                    best_digit_char
+                    and suit_guess == "man"
+                    and confidence < 0.80
+                    and best_digit_score >= 0.70
+                )
+                if strict or lenient:
+                    label_char = best_digit_char
+                    debug["label"] = label_char
+                    debug["confidence"] = best_digit_score
+                    value = int(label_char)
+                    return Tile(SUIT_MAP[suit_guess], value), debug
+                # Dragon colour override when label-zone has red (e.g. East wind
+                # tile with red 東 character that _detect_suit reads as "man").
+                # Guard: only when confidence is LOW so genuine East tiles (strong
+                # "E" match) are not overridden, AND no decent digit candidate
+                # exists (a strong digit match means it's a numbered tile, not
+                # a dragon — the Ht/Ch assignment would be wrong).
+                _DRAGON_OVERRIDE_MAX_CONF = 0.78
+                _DRAGON_MIN_DIGIT_CLEAR = 0.70
+                if confidence < _DRAGON_OVERRIDE_MAX_CONF and best_digit_score < _DRAGON_MIN_DIGIT_CLEAR:
+                    if suit_guess == "sou":
+                        label_char = "Ht"
+                        debug["label"] = label_char
+                    elif suit_guess == "man":
+                        label_char = "Ch"
+                        debug["label"] = label_char
+            else:
+                # Label zone has no significant red → genuine wind tile
+                # (South=teal, West=blue, North=dark).  Trust the wind letter,
+                # but still apply the sou dragon override unconditionally:
+                # no wind tile has a green body, so suit_guess="sou" uniquely
+                # identifies a Hatsu tile whose label was confused with a wind
+                # letter (common at the left-player 270° rotation scale).
+                if suit_guess == "sou":
+                    label_char = "Ht"
+                    debug["label"] = label_char
         suit, value = LABEL_TO_HONOR[label_char]
         return Tile(suit, value), debug
 
