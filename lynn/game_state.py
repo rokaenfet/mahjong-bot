@@ -125,12 +125,16 @@ SCORE_LEFT_SUB  = dict(y_start=0.10, y_end=0.30, x_start=0.30, x_end=0.42)
 SCORE_RIGHT_SUB = dict(y_start=0.10, y_end=0.28, x_start=0.58, x_end=0.70)
 
 # Seat-wind badge sub-regions (small coloured icons flanking the self-score row).
-# Left/right badges are confirmed at y≈0.38-0.55 at the horizontal edges.
-# Top/self badges are not reliably visible in the center panel.
-SEAT_LEFT_SUB   = dict(y_start=0.38, y_end=0.58, x_start=0.00, x_end=0.16)
-SEAT_RIGHT_SUB  = dict(y_start=0.38, y_end=0.58, x_start=0.84, x_end=1.00)
-SEAT_TOP_SUB    = dict(y_start=0.00, y_end=0.10, x_start=0.00, x_end=0.16)
-SEAT_SELF_SUB   = dict(y_start=0.64, y_end=0.84, x_start=0.04, x_end=0.22)
+# Seat-wind badges sit at the 4 corners of the centre octagonal indicator.
+# Positions confirmed via pixel-level grid analysis of mahjongsoul7.png.
+# W badge (Self) : top-left corner  of the octagon  x≈28-34%, y≈1-7%
+# S badge (Top)  : top-right corner of the octagon  x≈66-76%, y≈3-8%
+# N badge (Left) : left  midpoint   of the octagon  x≈14-22%, y≈25-34%
+# E badge (Right): right midpoint   of the octagon  x≈78-86%, y≈24-33%
+SEAT_SELF_SUB   = dict(y_start=0.01, y_end=0.08, x_start=0.26, x_end=0.36)
+SEAT_TOP_SUB    = dict(y_start=0.03, y_end=0.09, x_start=0.64, x_end=0.77)
+SEAT_LEFT_SUB   = dict(y_start=0.24, y_end=0.35, x_start=0.12, x_end=0.24)
+SEAT_RIGHT_SUB  = dict(y_start=0.23, y_end=0.34, x_start=0.76, x_end=0.88)
 
 # Template directories for text elements
 _HERE               = Path(__file__).parent
